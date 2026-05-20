@@ -294,11 +294,17 @@ def main():
     else:
         channel_id = args.channel
 
-    info = client.conversations_info(channel=channel_id)
-    if not info.get("ok"):
-        log.error("채널 접근 불가: %s", info.get("error"))
-        sys.exit(1)
-    ch_name = (info.get("channel") or {}).get("name") or "(DM)"
+    # 채널 메타 정보 — 표시용이라 실패해도 진행 (im:read/channels:read scope 없을 때 우회)
+    try:
+        info = client.conversations_info(channel=channel_id)
+        ch_name = (info.get("channel") or {}).get("name") or "(DM)"
+    except SlackApiError as e:
+        if e.response.get("error") == "missing_scope":
+            log.warning("conversations.info scope 없음 — 채널명 표시 skip (계속 진행)")
+            ch_name = "(scope 부족)"
+        else:
+            log.error("채널 접근 불가: %s", e.response.get("error"))
+            sys.exit(1)
     log.info("대상 채널: %s [%s]", channel_id, ch_name)
 
     since_ts = to_ts(args.since)

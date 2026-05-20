@@ -181,10 +181,13 @@ def backup_conversation(client: WebClient, channel: str, since_ts: float | None,
             users[uid] = {"id": uid, "name": "?"}
         time.sleep(0.2)
 
-    # 저장
-    fname = f"backup_{channel}_{datetime.now():%Y%m%d_%H%M%S}.json"
-    path = BACKUP_DIR / fname
-    with open(path, "w", encoding="utf-8") as f:
+    # 저장 — JSON (전체) + TXT (사람 읽기 쉽게)
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    json_path = BACKUP_DIR / f"backup_{channel}_{stamp}.json"
+    txt_path = BACKUP_DIR / f"backup_{channel}_{stamp}.txt"
+
+    # JSON — 전체 메타 보존
+    with open(json_path, "w", encoding="utf-8") as f:
         json.dump({
             "channel": channel,
             "exported_at": datetime.now().isoformat(),
@@ -194,8 +197,25 @@ def backup_conversation(client: WebClient, channel: str, since_ts: float | None,
             "users": users,
             "messages": all_msgs,
         }, f, ensure_ascii=False, indent=2)
-    log.info("백업 저장: %s (%d 메시지, %d 사용자)", path, len(all_msgs), len(users))
-    return path
+
+    # TXT — [시간] 이름: 텍스트
+    with open(txt_path, "w", encoding="utf-8") as f:
+        f.write(f"# Slack 대화 백업\n")
+        f.write(f"# 채널: {channel}\n")
+        f.write(f"# 백업 시각: {datetime.now().isoformat()}\n")
+        f.write(f"# 메시지 수: {len(all_msgs)}\n")
+        f.write(f"#\n")
+        for m in all_msgs:
+            uid = m.get("user") or m.get("bot_id") or "?"
+            who = users.get(uid, {}).get("real_name") or users.get(uid, {}).get("name") or uid
+            dt = datetime.fromtimestamp(float(m["ts"])).strftime("%Y-%m-%d %H:%M:%S")
+            text = (m.get("text") or "").replace("\n", " ").strip()
+            # 스레드 회신은 indent
+            prefix = "  └ " if m.get("thread_ts") and m.get("thread_ts") != m.get("ts") else ""
+            f.write(f"[{dt}] {prefix}{who}: {text}\n")
+
+    log.info("백업 저장: %s + %s (%d 메시지, %d 사용자)", json_path.name, txt_path.name, len(all_msgs), len(users))
+    return json_path
 
 
 def to_ts(date_str: str | None) -> float | None:

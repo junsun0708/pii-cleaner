@@ -73,7 +73,10 @@ python slack_self_delete.py --user 상대방@회사.com --backup-only
 python slack_self_delete.py --user 상대방@회사.com --backup --execute
 ```
 
-- 저장 위치: `backups/backup_{channel}_{YYYYMMDD_HHMMSS}.json`
+- 저장 위치: `backups/backup_{channel}_{YYYYMMDD_HHMMSS}.{json,txt}`
+- **두 파일 동시 생성**:
+  - `.json` — 전체 메타 보존 (채널·시각·사용자·첨부 메타·원본 필드)
+  - `.txt` — 사람이 읽기 쉽게 `[시간] 이름: 텍스트` (스레드 회신은 `└` 들여쓰기)
 - 내용:
   - 채널 ID·export 시각
   - 모든 메시지 (본인 + 상대방) + 스레드 회신
@@ -81,6 +84,19 @@ python slack_self_delete.py --user 상대방@회사.com --backup --execute
   - 첨부 파일 메타 (URL/이름/크기 — 실제 파일 다운로드 X)
 - 시간순 정렬됨 (ts 기준)
 - 첨부 파일 실제 다운로드는 향후 옵션 추가 가능 (`files:read` scope 필요)
+
+### TXT 예시
+```
+# Slack 대화 백업
+# 채널: D05M91D7LLQ
+# 백업 시각: 2026-05-20T11:30:00
+# 메시지 수: 247
+#
+[2024-12-15 14:30:00] 홍길동: 안녕하세요
+[2024-12-15 14:30:30] 정용후: 네 안녕하세요
+[2024-12-15 14:31:00] 정용후: 회의록 공유드립니다
+[2024-12-15 14:31:45]   └ 홍길동: 확인했습니다
+```
 
 ```bash
 --sleep 1.1             # chat.delete 간격 (초)

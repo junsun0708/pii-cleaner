@@ -17,7 +17,9 @@
 | `im:history` | DM 메시지 조회 |
 | `mpim:history` | Multi-DM 메시지 조회 |
 | `chat:write` | 본인 메시지 삭제 |
-| `users:read` (옵션) | 사용자 id 확인용 |
+| `users:read` | 사용자 id 확인용 (--user 옵션 사용 시 필수) |
+| `users:read.email` | 이메일로 사용자 조회 (`--user hong@example.com`) |
+| `im:write` | 1:1 DM 채널 열기 (`conversations.open`, --user 사용 시) |
 
 ## 토큰 발급
 1. `https://api.slack.com/apps` → 「Create New App」 (From scratch)
@@ -34,14 +36,23 @@ cp .env.example .env
 python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 
-# 1) dry-run — 삭제 대상 미리보기 (실제 삭제 X)
+# 1) 채널 직접 — dry-run
 python slack_self_delete.py --channel C0123ABCD --dry-run
 
-# 2) 실행
-python slack_self_delete.py --channel C0123ABCD
+# 2) 채널 실행
+python slack_self_delete.py --channel C0123ABCD --execute
 
-# DM 도 동일 (DM 의 channel id 도 C 또는 D 로 시작)
+# 3) DM — channel id 직접 (D... 또는 C...)
 python slack_self_delete.py --channel D0987XYZ --dry-run
+
+# 4) DM — 상대방 user_id 로 자동 조회
+python slack_self_delete.py --user U0987XYZ --dry-run
+
+# 5) DM — @핸들로 조회
+python slack_self_delete.py --user @hong.gildong --dry-run
+
+# 6) DM — 이메일로 조회
+python slack_self_delete.py --user hong@example.com --dry-run
 
 # 옵션
 --since 2024-01-01      # 그 이후 메시지만

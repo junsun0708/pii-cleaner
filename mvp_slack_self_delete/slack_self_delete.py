@@ -38,8 +38,20 @@ log = logging.getLogger("slack_self_delete")
 
 
 def parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="지정 채널/DM 의 본인 메시지만 삭제")
-    p.add_argument("--channel", required=True, help="채널 ID (C/G/D/MP... 로 시작)")
+    p = argparse.ArgumentParser(
+        description="지정 채널/DM 의 본인 메시지만 삭제",
+        epilog=(
+            "예시:\n"
+            "  --channel C0123ABCD       # 채널 ID 직접\n"
+            "  --user U0987XYZ           # 그 사람과의 1:1 DM 자동 조회\n"
+            "  --user @hong.gildong      # 핸들로 조회\n"
+            "  --user hong@example.com   # 이메일로 조회"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    target = p.add_mutually_exclusive_group(required=True)
+    target.add_argument("--channel", help="채널/DM ID (C/G/D/MP... 로 시작)")
+    target.add_argument("--user", help="DM 상대방. user_id(U...) / @핸들 / 이메일 모두 가능")
     p.add_argument("--dry-run", action="store_true", help="삭제 대상 미리보기 (실제 삭제 X) [기본]")
     p.add_argument("--execute", action="store_true", help="실제 삭제 실행")
     p.add_argument("--since", type=str, default=None, help="YYYY-MM-DD 이후 메시지만")
@@ -53,6 +65,56 @@ def parse_args() -> argparse.Namespace:
     if not args.execute:
         args.dry_run = True
     return args
+
+
+def resolve_user_id(client: WebClient, hint: str) -> str:
+    """user_id(U...) / @핸들 / 이메일 → user_id."""
+    hint = hint.strip()
+
+    # 1) user_id 직접
+    if hint.startswith(("U", "W")) and len(hint) > 5 and " " not in hint:
+        return hint
+
+    # 2) 이메일
+    if "@" in hint and "." in hint.split("@")[-1]:
+        resp = client.users_lookupByEmail(email=hint)
+        if not resp.get("ok"):
+            raise RuntimeError(f"users.lookupByEmail fail: {resp.get('error')}")
+        return resp["user"]["id"]
+
+    # 3) @핸들 또는 display name → users.list 순회
+    target_handle = hint.lstrip("@").lower()
+    cursor: str | None = None
+    while True:
+        kwargs = {"limit": 200}
+        if cursor:
+            kwargs["cursor"] = cursor
+        resp = client.users_list(**kwargs)
+        if not resp.get("ok"):
+            raise RuntimeError(f"users.list fail: {resp.get('error')}")
+        for u in resp.get("members", []):
+            if u.get("deleted") or u.get("is_bot"):
+                continue
+            names = {
+                (u.get("name") or "").lower(),
+                (u.get("real_name") or "").lower(),
+                ((u.get("profile") or {}).get("display_name") or "").lower(),
+                ((u.get("profile") or {}).get("real_name") or "").lower(),
+            }
+            if target_handle in names:
+                return u["id"]
+        cursor = (resp.get("response_metadata") or {}).get("next_cursor")
+        if not cursor:
+            break
+    raise RuntimeError(f"사용자 못 찾음: {hint!r}")
+
+
+def open_dm(client: WebClient, other_user_id: str) -> str:
+    """그 사람과의 1:1 DM channel id 반환 (없으면 생성)."""
+    resp = client.conversations_open(users=other_user_id)
+    if not resp.get("ok"):
+        raise RuntimeError(f"conversations.open fail: {resp.get('error')}")
+    return resp["channel"]["id"]
 
 
 def to_ts(date_str: str | None) -> float | None:
@@ -217,12 +279,27 @@ def main():
     my_user_id = me["user_id"]
     log.info("로그인: user=%s (%s) team=%s", me.get("user"), my_user_id, me.get("team"))
 
-    info = client.conversations_info(channel=args.channel)
+    # 대상 채널 결정 — --channel 또는 --user(상대방 → DM 자동 조회)
+    if args.user:
+        try:
+            target_user_id = resolve_user_id(client, args.user)
+        except RuntimeError as e:
+            log.error("사용자 해석 실패: %s", e)
+            sys.exit(1)
+        if target_user_id == my_user_id:
+            log.error("--user 가 본인입니다. 본인 DM 은 의미 없음.")
+            sys.exit(1)
+        channel_id = open_dm(client, target_user_id)
+        log.info("DM 상대: %s (%s) → channel=%s", args.user, target_user_id, channel_id)
+    else:
+        channel_id = args.channel
+
+    info = client.conversations_info(channel=channel_id)
     if not info.get("ok"):
         log.error("채널 접근 불가: %s", info.get("error"))
         sys.exit(1)
     ch_name = (info.get("channel") or {}).get("name") or "(DM)"
-    log.info("대상 채널: %s [%s]", args.channel, ch_name)
+    log.info("대상 채널: %s [%s]", channel_id, ch_name)
 
     since_ts = to_ts(args.since)
     until_ts = to_ts(args.until)
@@ -231,7 +308,7 @@ def main():
 
     log.info("=== 1단계: 본인 메시지 수집 ===")
     messages = collect_my_messages(
-        client, args.channel, my_user_id,
+        client, channel_id, my_user_id,
         since_ts, until_ts, args.keep_pattern, args.limit,
     )
     log.info("수집 완료: %d 개", len(messages))
@@ -253,7 +330,7 @@ def main():
         return
 
     log.info("=== 2단계: 삭제 실행 ===")
-    counts = delete_messages(client, args.channel, messages, my_user_id, args.sleep)
+    counts = delete_messages(client, channel_id, messages, my_user_id, args.sleep)
     log.info("완료: %s", counts)
 
 

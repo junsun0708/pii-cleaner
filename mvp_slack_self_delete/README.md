@@ -63,6 +63,7 @@ python slack_self_delete.py --user hong@example.com --dry-run
 --backup                # 삭제 전 전체 대화 (본인+상대방+스레드) JSON 백업
 --backup-only           # 백업만 하고 종료 (삭제 X) — 단순 export 용
 --delete-files          # 본인 메시지의 첨부 파일도 함께 삭제 (files:write scope 필요)
+--workers 5             # 병렬 worker 수 (기본 1, 권장 1~5)
 ```
 
 ## 백업 (`--backup` / `--backup-only`)
@@ -107,7 +108,9 @@ python slack_self_delete.py --user 상대방@회사.com --backup --execute
 ## 안전장치
 1. **dry-run 기본 권장** — `--execute` 명시 안 하면 dry-run
 2. **user_id 일치 확인** — 매 메시지마다 `msg.user == auth.test().user_id` 검증
-3. **rate limit** — Slack 정책 = 1 req/sec (`chat.delete` Tier 3). `time.sleep(1.1)` 보수적
+3. **rate limit** — Slack `chat.delete` Tier 3 ≈ 50 req/min. 기본 `sleep 1.1s`.
+   - `--workers N` 병렬 시 `sleep × N` 로 자동 분산 (글로벌 RPS 유지)
+   - `ratelimited` 응답 시 `Retry-After` 따라 자동 백오프 (최대 5회)
 4. **로그** — 삭제한 메시지 ts/내용 첫 100자 → `logs/deleted_YYYYMMDD_HHMM.jsonl`
 5. **중단 가능** — Ctrl+C 시 진행 상황 저장, 재시작 시 이어서
 

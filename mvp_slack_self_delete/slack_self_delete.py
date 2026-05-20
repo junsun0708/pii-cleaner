@@ -18,7 +18,9 @@ import json
 import logging
 import os
 import sys
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -59,6 +61,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--backup", action="store_true", help="대상 채널/DM 전체 (본인+상대방+스레드+첨부 메타) JSON 백업")
     p.add_argument("--backup-only", action="store_true", help="백업만 하고 종료 (삭제 X)")
     p.add_argument("--delete-files", action="store_true", help="본인 메시지의 첨부 파일도 함께 삭제 (files:write scope 필요)")
+    p.add_argument("--workers", type=int, default=1, help="병렬 삭제 worker 수 (기본 1). 권장 1~5. rate limit (50 rpm) 에 막혀 5 초과는 의미 없음")
     p.add_argument("--since", type=str, default=None, help="YYYY-MM-DD 이후 메시지만")
     p.add_argument("--until", type=str, default=None, help="YYYY-MM-DD 이전 메시지만")
     p.add_argument("--limit", type=int, default=None, help="최대 N개만 처리 (테스트용)")
@@ -352,6 +355,68 @@ def _delete_files_of_msg(client: WebClient, msg: dict, my_user_id: str) -> dict:
     return out
 
 
+def _delete_one(
+    client: WebClient,
+    channel: str,
+    msg: dict,
+    my_user_id: str,
+    delete_files: bool,
+    sleep_sec: float,
+    log_lock: threading.Lock,
+    log_fp,
+) -> dict:
+    """단일 메시지 삭제. ratelimited 시 자동 retry. 결과 dict."""
+    result = {"ok": 0, "skip": 0, "fail": 0, "file_ok": 0, "file_skip": 0, "file_fail": 0}
+    if msg.get("user") != my_user_id:
+        result["skip"] += 1
+        return result
+    ts = msg["ts"]
+    text_head = (msg.get("text") or "")[:100]
+
+    if delete_files and msg.get("files"):
+        fc = _delete_files_of_msg(client, msg, my_user_id)
+        result["file_ok"] = fc["ok"]; result["file_skip"] = fc["skip"]; result["file_fail"] = fc["fail"]
+
+    # 최대 5회 retry (ratelimited)
+    for attempt in range(5):
+        try:
+            resp = client.chat_delete(channel=channel, ts=ts)
+            if resp.get("ok"):
+                result["ok"] += 1
+                with log_lock:
+                    log.info("OK ts=%s %r", ts, text_head)
+                    log_fp.write(json.dumps({
+                        "ok": True, "ts": ts, "text_head": text_head,
+                        "deleted_at": datetime.now().isoformat(),
+                    }, ensure_ascii=False) + "\n")
+                    log_fp.flush()
+            else:
+                with log_lock:
+                    log.warning("FAIL ts=%s error=%s", ts, resp.get("error"))
+                result["fail"] += 1
+            break
+        except SlackApiError as e:
+            err = e.response.get("error", "")
+            if err == "ratelimited":
+                retry_after = int(e.response.headers.get("Retry-After", "5"))
+                with log_lock:
+                    log.warning("rate limit ts=%s; sleep %ds (attempt %d/5)", ts, retry_after, attempt+1)
+                time.sleep(retry_after + 1)
+                continue
+            if err in ("message_not_found", "cant_delete_message"):
+                with log_lock:
+                    log.info("SKIP ts=%s reason=%s", ts, err)
+                result["skip"] += 1
+                break
+            with log_lock:
+                log.error("ERR ts=%s err=%s", ts, err)
+            result["fail"] += 1
+            break
+
+    time.sleep(sleep_sec)
+    return result
+
+
 def delete_messages(
     client: WebClient,
     channel: str,
@@ -359,52 +424,43 @@ def delete_messages(
     my_user_id: str,
     sleep_sec: float,
     delete_files: bool = False,
+    workers: int = 1,
 ) -> dict:
-    """본인 메시지 삭제. user_id 재검증 + rate limit + 로그. 옵션: 첨부 파일 함께 삭제."""
+    """본인 메시지 삭제 — 옵션: 병렬 worker + 자동 rate-limit retry."""
     log_path = LOG_DIR / f"deleted_{datetime.now():%Y%m%d_%H%M%S}.jsonl"
     counts = {"ok": 0, "skip": 0, "fail": 0, "file_ok": 0, "file_skip": 0, "file_fail": 0}
+    lock = threading.Lock()
+
+    # rate limit 분산: workers 가 N개면 각자 sleep 을 N배. 글로벌 RPS 유지.
+    per_worker_sleep = sleep_sec * workers if workers > 1 else sleep_sec
+
+    log.info("삭제 시작: %d 메시지, workers=%d, per-worker sleep=%.2fs", len(messages), workers, per_worker_sleep)
 
     with open(log_path, "w", encoding="utf-8") as f:
-        for i, msg in enumerate(messages, 1):
-            # 재검증 — 절대 다른 사람 메시지 삭제하지 않음
-            if msg.get("user") != my_user_id:
-                log.warning("[%d] SKIP — user_id 불일치 (%s != %s)", i, msg.get("user"), my_user_id)
-                counts["skip"] += 1
-                continue
-            ts = msg["ts"]
-            text_head = (msg.get("text") or "")[:100]
-            # 첨부 파일 먼저 삭제 (메시지 삭제 후엔 file ref 잃을 수 있음)
-            if delete_files and msg.get("files"):
-                file_counts = _delete_files_of_msg(client, msg, my_user_id)
-                counts["file_ok"] += file_counts["ok"]
-                counts["file_skip"] += file_counts["skip"]
-                counts["file_fail"] += file_counts["fail"]
-            try:
-                resp = client.chat_delete(channel=channel, ts=ts)
-                if resp.get("ok"):
-                    log.info("[%d/%d] OK ts=%s text=%r", i, len(messages), ts, text_head)
-                    counts["ok"] += 1
-                    f.write(json.dumps({
-                        "ok": True, "ts": ts, "text_head": text_head,
-                        "deleted_at": datetime.now().isoformat(),
-                    }, ensure_ascii=False) + "\n")
-                else:
-                    log.warning("[%d] FAIL ts=%s error=%s", i, ts, resp.get("error"))
-                    counts["fail"] += 1
-            except SlackApiError as e:
-                err = e.response.get("error", "")
-                if err == "ratelimited":
-                    retry_after = int(e.response.headers.get("Retry-After", "5"))
-                    log.warning("rate limit; sleep %d", retry_after)
-                    time.sleep(retry_after + 1)
-                    continue  # 같은 메시지 재시도 위해 i 증가 X — 단순화 위해 다음으로
-                if err in ("message_not_found", "cant_delete_message"):
-                    log.info("[%d] SKIP ts=%s reason=%s", i, ts, err)
-                    counts["skip"] += 1
-                else:
-                    log.error("[%d] ERR ts=%s err=%s", i, ts, err)
-                    counts["fail"] += 1
-            time.sleep(sleep_sec)
+        if workers <= 1:
+            # 직렬 — 진행률 표시 깔끔
+            for i, msg in enumerate(messages, 1):
+                r = _delete_one(client, channel, msg, my_user_id, delete_files, per_worker_sleep, lock, f)
+                for k, v in r.items():
+                    counts[k] += v
+                if i % 10 == 0 or i == len(messages):
+                    log.info("진행: %d/%d", i, len(messages))
+        else:
+            # 병렬 — ThreadPoolExecutor
+            with ThreadPoolExecutor(max_workers=workers) as ex:
+                futures = [
+                    ex.submit(_delete_one, client, channel, m, my_user_id, delete_files, per_worker_sleep, lock, f)
+                    for m in messages
+                ]
+                done = 0
+                for fut in as_completed(futures):
+                    r = fut.result()
+                    for k, v in r.items():
+                        counts[k] += v
+                    done += 1
+                    if done % 10 == 0 or done == len(messages):
+                        with lock:
+                            log.info("진행: %d/%d", done, len(messages))
 
     log.info("로그 저장: %s", log_path)
     return counts
@@ -496,7 +552,10 @@ def main():
         return
 
     log.info("=== 2단계: 삭제 실행 ===")
-    counts = delete_messages(client, channel_id, messages, my_user_id, args.sleep, args.delete_files)
+    counts = delete_messages(
+        client, channel_id, messages, my_user_id,
+        args.sleep, args.delete_files, args.workers,
+    )
     log.info("완료: %s", counts)
 
 

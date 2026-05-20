@@ -58,6 +58,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--execute", action="store_true", help="실제 삭제 실행")
     p.add_argument("--backup", action="store_true", help="대상 채널/DM 전체 (본인+상대방+스레드+첨부 메타) JSON 백업")
     p.add_argument("--backup-only", action="store_true", help="백업만 하고 종료 (삭제 X)")
+    p.add_argument("--delete-files", action="store_true", help="본인 메시지의 첨부 파일도 함께 삭제 (files:write scope 필요)")
     p.add_argument("--since", type=str, default=None, help="YYYY-MM-DD 이후 메시지만")
     p.add_argument("--until", type=str, default=None, help="YYYY-MM-DD 이전 메시지만")
     p.add_argument("--limit", type=int, default=None, help="최대 N개만 처리 (테스트용)")
@@ -319,10 +320,49 @@ def _is_mine(msg: dict, my_user_id: str, keep_pattern: str | None) -> bool:
     return True
 
 
-def delete_messages(client: WebClient, channel: str, messages: list[dict], my_user_id: str, sleep_sec: float) -> dict:
-    """본인 메시지 삭제. user_id 재검증 + rate limit + 로그."""
+def _delete_files_of_msg(client: WebClient, msg: dict, my_user_id: str) -> dict:
+    """메시지의 첨부 파일을 삭제. 본인 소유 파일만."""
+    out = {"ok": 0, "skip": 0, "fail": 0}
+    for fobj in (msg.get("files") or []):
+        fid = fobj.get("id")
+        if not fid:
+            continue
+        # 파일 owner 가 본인인지 재검증 (다른 사람 공유 파일 보호)
+        f_user = fobj.get("user")
+        if f_user and f_user != my_user_id:
+            log.info("    file=%s skip (owner=%s != me)", fid, f_user)
+            out["skip"] += 1
+            continue
+        try:
+            resp = client.files_delete(file=fid)
+            if resp.get("ok"):
+                log.info("    file=%s OK (%s)", fid, fobj.get("name") or "")
+                out["ok"] += 1
+            else:
+                log.warning("    file=%s FAIL %s", fid, resp.get("error"))
+                out["fail"] += 1
+        except SlackApiError as e:
+            err = e.response.get("error", "")
+            if err in ("file_not_found", "file_deleted"):
+                out["skip"] += 1
+            else:
+                log.warning("    file=%s ERR %s", fid, err)
+                out["fail"] += 1
+        time.sleep(0.5)
+    return out
+
+
+def delete_messages(
+    client: WebClient,
+    channel: str,
+    messages: list[dict],
+    my_user_id: str,
+    sleep_sec: float,
+    delete_files: bool = False,
+) -> dict:
+    """본인 메시지 삭제. user_id 재검증 + rate limit + 로그. 옵션: 첨부 파일 함께 삭제."""
     log_path = LOG_DIR / f"deleted_{datetime.now():%Y%m%d_%H%M%S}.jsonl"
-    counts = {"ok": 0, "skip": 0, "fail": 0}
+    counts = {"ok": 0, "skip": 0, "fail": 0, "file_ok": 0, "file_skip": 0, "file_fail": 0}
 
     with open(log_path, "w", encoding="utf-8") as f:
         for i, msg in enumerate(messages, 1):
@@ -333,6 +373,12 @@ def delete_messages(client: WebClient, channel: str, messages: list[dict], my_us
                 continue
             ts = msg["ts"]
             text_head = (msg.get("text") or "")[:100]
+            # 첨부 파일 먼저 삭제 (메시지 삭제 후엔 file ref 잃을 수 있음)
+            if delete_files and msg.get("files"):
+                file_counts = _delete_files_of_msg(client, msg, my_user_id)
+                counts["file_ok"] += file_counts["ok"]
+                counts["file_skip"] += file_counts["skip"]
+                counts["file_fail"] += file_counts["fail"]
             try:
                 resp = client.chat_delete(channel=channel, ts=ts)
                 if resp.get("ok"):
@@ -433,19 +479,24 @@ def main():
         return
 
     log.info("=== 미리보기 (최근 5개) ===")
+    file_total = sum(len(m.get("files") or []) for m in messages)
     for m in messages[:5]:
         text = (m.get("text") or "")[:80]
         dt = datetime.fromtimestamp(float(m["ts"]))
-        log.info("  %s  %r", dt.strftime("%Y-%m-%d %H:%M"), text)
+        n_files = len(m.get("files") or [])
+        suffix = f"  📎×{n_files}" if n_files else ""
+        log.info("  %s  %r%s", dt.strftime("%Y-%m-%d %H:%M"), text, suffix)
     if len(messages) > 5:
-        log.info("  ... (총 %d 개)", len(messages))
+        log.info("  ... (총 %d 개, 첨부 파일 %d 개)", len(messages), file_total)
+    if args.delete_files and file_total:
+        log.info("  ⚠ --delete-files 켜져있어 첨부 %d 개도 함께 삭제 예정", file_total)
 
     if args.dry_run:
         log.info("=== DRY-RUN 종료 (--execute 추가 시 실제 삭제) ===")
         return
 
     log.info("=== 2단계: 삭제 실행 ===")
-    counts = delete_messages(client, channel_id, messages, my_user_id, args.sleep)
+    counts = delete_messages(client, channel_id, messages, my_user_id, args.sleep, args.delete_files)
     log.info("완료: %s", counts)
 
 

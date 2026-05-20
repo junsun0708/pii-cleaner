@@ -17,6 +17,7 @@
 | `im:history` | DM 메시지 조회 |
 | `mpim:history` | Multi-DM 메시지 조회 |
 | `chat:write` | 본인 메시지 삭제 |
+| `files:write` | 첨부 파일 삭제 (`--delete-files` 옵션 사용 시 필수) |
 | `users:read` | 사용자 id 확인용 (--user 옵션 사용 시 필수) |
 | `users:read.email` | 이메일로 사용자 조회 (`--user hong@example.com`) |
 | `im:write` | 1:1 DM 채널 열기 (`conversations.open`, --user 사용 시) |
@@ -61,6 +62,7 @@ python slack_self_delete.py --user hong@example.com --dry-run
 --keep-pattern "공지"   # 이 단어 포함한 본인 메시지는 제외
 --backup                # 삭제 전 전체 대화 (본인+상대방+스레드) JSON 백업
 --backup-only           # 백업만 하고 종료 (삭제 X) — 단순 export 용
+--delete-files          # 본인 메시지의 첨부 파일도 함께 삭제 (files:write scope 필요)
 ```
 
 ## 백업 (`--backup` / `--backup-only`)

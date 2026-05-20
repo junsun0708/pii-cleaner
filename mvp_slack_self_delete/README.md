@@ -59,6 +59,31 @@ python slack_self_delete.py --user hong@example.com --dry-run
 --until 2024-12-31      # 그 이전 메시지만
 --limit 100             # 최대 N개만 (테스트용)
 --keep-pattern "공지"   # 이 단어 포함한 본인 메시지는 제외
+--backup                # 삭제 전 전체 대화 (본인+상대방+스레드) JSON 백업
+--backup-only           # 백업만 하고 종료 (삭제 X) — 단순 export 용
+```
+
+## 백업 (`--backup` / `--backup-only`)
+
+```bash
+# 1) 단순 백업 — 삭제 안 함, JSON 파일만 생성
+python slack_self_delete.py --user 상대방@회사.com --backup-only
+
+# 2) 백업 + 삭제 — 안전한 운영 패턴
+python slack_self_delete.py --user 상대방@회사.com --backup --execute
+```
+
+- 저장 위치: `backups/backup_{channel}_{YYYYMMDD_HHMMSS}.json`
+- 내용:
+  - 채널 ID·export 시각
+  - 모든 메시지 (본인 + 상대방) + 스레드 회신
+  - 사용자 메타 (id/name/real_name/email)
+  - 첨부 파일 메타 (URL/이름/크기 — 실제 파일 다운로드 X)
+- 시간순 정렬됨 (ts 기준)
+- 첨부 파일 실제 다운로드는 향후 옵션 추가 가능 (`files:read` scope 필요)
+
+```bash
+--sleep 1.1             # chat.delete 간격 (초)
 ```
 
 ## 안전장치

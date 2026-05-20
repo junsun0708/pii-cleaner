@@ -29,6 +29,8 @@ from slack_sdk.errors import SlackApiError
 THIS_DIR = Path(__file__).resolve().parent
 LOG_DIR = THIS_DIR / "logs"
 LOG_DIR.mkdir(exist_ok=True)
+BACKUP_DIR = THIS_DIR / "backups"
+BACKUP_DIR.mkdir(exist_ok=True)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -54,6 +56,8 @@ def parse_args() -> argparse.Namespace:
     target.add_argument("--user", help="DM 상대방. user_id(U...) / @핸들 / 이메일 모두 가능")
     p.add_argument("--dry-run", action="store_true", help="삭제 대상 미리보기 (실제 삭제 X) [기본]")
     p.add_argument("--execute", action="store_true", help="실제 삭제 실행")
+    p.add_argument("--backup", action="store_true", help="대상 채널/DM 전체 (본인+상대방+스레드+첨부 메타) JSON 백업")
+    p.add_argument("--backup-only", action="store_true", help="백업만 하고 종료 (삭제 X)")
     p.add_argument("--since", type=str, default=None, help="YYYY-MM-DD 이후 메시지만")
     p.add_argument("--until", type=str, default=None, help="YYYY-MM-DD 이전 메시지만")
     p.add_argument("--limit", type=int, default=None, help="최대 N개만 처리 (테스트용)")
@@ -115,6 +119,83 @@ def open_dm(client: WebClient, other_user_id: str) -> str:
     if not resp.get("ok"):
         raise RuntimeError(f"conversations.open fail: {resp.get('error')}")
     return resp["channel"]["id"]
+
+
+def backup_conversation(client: WebClient, channel: str, since_ts: float | None, until_ts: float | None) -> Path:
+    """채널/DM 의 모든 메시지 (본인+상대방+스레드) JSON 백업."""
+    all_msgs: list[dict] = []
+    cursor: str | None = None
+
+    while True:
+        kwargs = {"channel": channel, "limit": 200}
+        if cursor: kwargs["cursor"] = cursor
+        if since_ts: kwargs["oldest"] = str(since_ts)
+        if until_ts: kwargs["latest"] = str(until_ts)
+
+        resp = client.conversations_history(**kwargs)
+        if not resp.get("ok"):
+            log.error("backup history fail: %s", resp.get("error"))
+            break
+
+        for msg in resp.get("messages", []):
+            all_msgs.append(msg)
+            # 스레드 회신
+            if msg.get("thread_ts") and msg.get("reply_count", 0) > 0:
+                rcur: str | None = None
+                while True:
+                    rkw = {"channel": channel, "ts": msg["thread_ts"], "limit": 200}
+                    if rcur: rkw["cursor"] = rcur
+                    rresp = client.conversations_replies(**rkw)
+                    if not rresp.get("ok"): break
+                    for r in rresp.get("messages", []):
+                        if r.get("ts") != msg["thread_ts"]:  # parent 중복 제거
+                            all_msgs.append(r)
+                    if not rresp.get("has_more"): break
+                    rcur = (rresp.get("response_metadata") or {}).get("next_cursor")
+                    if not rcur: break
+                    time.sleep(0.5)
+
+        if not resp.get("has_more"): break
+        cursor = (resp.get("response_metadata") or {}).get("next_cursor")
+        if not cursor: break
+        time.sleep(0.5)
+
+    # 시간순 정렬
+    all_msgs.sort(key=lambda m: float(m.get("ts", 0)))
+
+    # 등장 user_id 집합 → 사용자 메타 함께 저장 (이름/이메일 매핑)
+    user_ids = {m.get("user") for m in all_msgs if m.get("user")}
+    users: dict[str, dict] = {}
+    for uid in user_ids:
+        try:
+            u = client.users_info(user=uid)
+            if u.get("ok"):
+                p = u["user"]
+                users[uid] = {
+                    "id": uid,
+                    "name": p.get("name"),
+                    "real_name": p.get("real_name"),
+                    "email": (p.get("profile") or {}).get("email"),
+                }
+        except SlackApiError:
+            users[uid] = {"id": uid, "name": "?"}
+        time.sleep(0.2)
+
+    # 저장
+    fname = f"backup_{channel}_{datetime.now():%Y%m%d_%H%M%S}.json"
+    path = BACKUP_DIR / fname
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump({
+            "channel": channel,
+            "exported_at": datetime.now().isoformat(),
+            "since": datetime.fromtimestamp(since_ts).isoformat() if since_ts else None,
+            "until": datetime.fromtimestamp(until_ts).isoformat() if until_ts else None,
+            "message_count": len(all_msgs),
+            "users": users,
+            "messages": all_msgs,
+        }, f, ensure_ascii=False, indent=2)
+    log.info("백업 저장: %s (%d 메시지, %d 사용자)", path, len(all_msgs), len(users))
+    return path
 
 
 def to_ts(date_str: str | None) -> float | None:
@@ -311,6 +392,14 @@ def main():
     until_ts = to_ts(args.until)
     log.info("범위: since=%s until=%s limit=%s keep_pattern=%r",
              args.since, args.until, args.limit, args.keep_pattern)
+
+    # 0단계: 백업 (옵션)
+    if args.backup or args.backup_only:
+        log.info("=== 0단계: 전체 백업 (본인+상대방+스레드) ===")
+        backup_conversation(client, channel_id, since_ts, until_ts)
+        if args.backup_only:
+            log.info("--backup-only 종료 (삭제 X)")
+            return
 
     log.info("=== 1단계: 본인 메시지 수집 ===")
     messages = collect_my_messages(

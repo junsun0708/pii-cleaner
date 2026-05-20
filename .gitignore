@@ -1,6 +1,9 @@
 .env
 .env.*
 !.env.example
+backups/
+mvp_slack_self_delete/backups/
+mvp_slack_self_delete/logs/
 .venv/
 venv/
 node_modules/

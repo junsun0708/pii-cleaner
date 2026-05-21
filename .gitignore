@@ -29,3 +29,7 @@ tmp/
 .ruff_cache/
 htmlcov/
 .coverage
+
+# MS365 토큰 캐시
+poc_ms365/.token_cache.bin
+mvp_ms365_self_delete/.token_cache.bin

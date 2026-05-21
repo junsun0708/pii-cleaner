@@ -33,3 +33,7 @@ htmlcov/
 # MS365 토큰 캐시
 poc_ms365/.token_cache.bin
 mvp_ms365_self_delete/.token_cache.bin
+
+# MS365 MVP 산출물
+mvp_ms365_self_delete/backups/
+mvp_ms365_self_delete/logs/

@@ -1,6 +1,8 @@
 .env
 .env.*
 !.env.example
+secrets.env
+**/secrets.env
 backups/
 mvp_slack_self_delete/backups/
 mvp_slack_self_delete/logs/

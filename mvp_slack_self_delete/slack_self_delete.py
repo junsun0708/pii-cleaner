@@ -30,7 +30,8 @@ from slack_sdk.errors import SlackApiError
 
 THIS_DIR = Path(__file__).resolve().parent
 LOG_DIR = THIS_DIR / "logs"
-LOG_DIR.mkdir(exist_ok=True)
+# 로그 저장 비활성화 — 필요 시 아래 줄 주석 해제
+# LOG_DIR.mkdir(exist_ok=True)
 BACKUP_DIR = THIS_DIR / "backups"
 BACKUP_DIR.mkdir(exist_ok=True)
 
@@ -427,7 +428,8 @@ def delete_messages(
     workers: int = 1,
 ) -> dict:
     """본인 메시지 삭제 — 옵션: 병렬 worker + 자동 rate-limit retry."""
-    log_path = LOG_DIR / f"deleted_{datetime.now():%Y%m%d_%H%M%S}.jsonl"
+    # 로그 저장 비활성화 — 필요 시 아래 두 줄(log_path + with open) 복원
+    # log_path = LOG_DIR / f"deleted_{datetime.now():%Y%m%d_%H%M%S}.jsonl"
     counts = {"ok": 0, "skip": 0, "fail": 0, "file_ok": 0, "file_skip": 0, "file_fail": 0}
     lock = threading.Lock()
 
@@ -436,7 +438,9 @@ def delete_messages(
 
     log.info("삭제 시작: %d 메시지, workers=%d, per-worker sleep=%.2fs", len(messages), workers, per_worker_sleep)
 
-    with open(log_path, "w", encoding="utf-8") as f:
+    # 원래는 log_path 로 기록 — 비활성화 위해 os.devnull 로 흘림
+    # with open(log_path, "w", encoding="utf-8") as f:
+    with open(os.devnull, "w", encoding="utf-8") as f:
         if workers <= 1:
             # 직렬 — 진행률 표시 깔끔
             for i, msg in enumerate(messages, 1):
@@ -462,7 +466,8 @@ def delete_messages(
                         with lock:
                             log.info("진행: %d/%d", done, len(messages))
 
-    log.info("로그 저장: %s", log_path)
+    # 로그 저장 비활성화
+    # log.info("로그 저장: %s", log_path)
     return counts
 
 
